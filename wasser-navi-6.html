@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="de"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Wasser-Navi</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<style>
+html,body{margin:0;height:100%;font:14px system-ui,sans-serif}
+#map{height:100%}
+.card{position:absolute;z-index:1000;background:#fff;color:#1a2530;border-radius:10px;box-shadow:0 2px 10px #0004;padding:10px}
+#bar{top:10px;left:50px;display:flex;gap:6px;flex-wrap:wrap;max-width:calc(100% - 70px)}
+button{border:1px solid #9ab;background:#f3f7fa;border-radius:7px;padding:6px 9px;font:inherit;cursor:pointer}
+button.on{background:#0a6ebd;color:#fff;border-color:#0a6ebd}
+#menu{top:60px;right:10px;width:270px;max-height:70%;overflow:auto;display:none}
+#info{bottom:24px;left:10px;width:300px;max-height:42%;overflow:auto}
+#menu h4,#info h4{margin:0 0 6px}
+input[type=range]{width:100%}
+ol{margin:6px 0;padding-left:20px}
+li.t{list-style:none;color:#a14;margin-left:-20px;font-size:12px}
+.saved{display:flex;gap:4px;align-items:center;margin:3px 0}
+.saved span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+small{color:#567}
+.wp{background:#0a6ebd;color:#fff;border-radius:50%;width:22px;height:22px;line-height:22px;text-align:center;font-weight:700;border:2px solid #fff}
+</style></head><body>
+<div id="map"></div>
+<div id="bar" class="card">
+ <button id="bWp" class="on">📍 Wegpunkt</button>
+ <button id="bZone">⛔ Sperrzone</button>
+ <button id="bDone" style="display:none">✔ Zone fertig</button>
+ <button id="bUndo">↶</button>
+ <button id="bClear">🗑</button>
+ <button id="bMenu">☰ Menü</button>
+</div>
+<div id="menu" class="card">
+ <h4>Geschwindigkeit</h4>
+ <div><b id="spv"></b>
+  <button id="uKmh" class="on">km/h</button><button id="uKn">kn</button></div>
+ <input type="range" id="sp" min="1" max="40" step="1" value="20">
+ <h4 style="margin-top:12px">Routing</h4>
+ <label><input type="checkbox" id="gv" checked> Grüne Flächen als Land meiden</label>
+ <div>Abstand zu Land/Sperrzonen: <b id="mgv">50 m</b></div>
+ <input type="range" id="mg" min="0" max="300" step="10" value="50">
+ <h4 style="margin-top:12px">Route speichern</h4>
+ <div style="display:flex;gap:4px"><input id="nm" placeholder="Name" style="flex:1;padding:5px"><button id="bSave">💾</button></div>
+ <div id="list"></div>
+</div>
+<div id="info" class="card"><h4>Route</h4><div id="out"><small>Klicke auf die Karte, um Wegpunkte zu setzen.</small></div></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<script>
+const $=id=>document.getElementById(id);
+const map=L.map('map').setView([53.33,8.48],12);
+const base1=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,attribution:'© Esri'}).addTo(map);
+const base2=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,attribution:'© Esri'});
+const sea=L.tileLayer('https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png',{maxZoom:18,attribution:'© OpenSeaMap'}).addTo(map);
+L.control.layers({'Karte':base1,'Satellit':base2},{'Seezeichen (OpenSeaMap)':sea},{position:'topright'}).addTo(map);
+const gr=L.layerGroup().addTo(map);
+let wps=[],zones=[],draft=[],mode='wp',unit='kmh',kmh=20;
+const K=Math.cos(53.3*Math.PI/180), T=Math.PI/180;
+const pt=l=>[l.lng*K,l.lat], ll=p=>({lat:p[1],lng:p[0]/K});
+
+function dist(a,b){const dl=(b.lat-a.lat)*T,dn=(b.lng-a.lng)*T,
+ h=Math.sin(dl/2)**2+Math.cos(a.lat*T)*Math.cos(b.lat*T)*Math.sin(dn/2)**2;
+ return 12742*Math.asin(Math.sqrt(h));}
+function brg(a,b){const y=Math.sin((b.lng-a.lng)*T)*Math.cos(b.lat*T),
+ x=Math.cos(a.lat*T)*Math.sin(b.lat*T)-Math.sin(a.lat*T)*Math.cos(b.lat*T)*Math.cos((b.lng-a.lng)*T);
+ return (Math.atan2(y,x)/T+360)%360;}
+const cross=(o,a,b)=>(a[0]-o[0])*(b[1]-o[1])-(a[1]-o[1])*(b[0]-o[0]);
+const segX=(p,q,r,s)=>cross(p,q,r)*cross(p,q,s)<0&&cross(r,s,p)*cross(r,s,q)<0;
+function inside(pg,x){let c=false;for(let i=0,j=pg.length-1;i<pg.length;j=i++){const a=pg[i],b=pg[j];
+ if((a[1]>x[1])!=(b[1]>x[1])&&x[0]<(b[0]-a[0])*(x[1]-a[1])/(b[1]-a[1])+a[0])c=!c;}return c;}
+
+const gRt=L.layerGroup().addTo(map);
+const SAT='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+const tcache=new Map();
+function tileOnce(z,x,y){return new Promise(res=>{const im=new Image();im.crossOrigin='anonymous';
+  im.onload=()=>{try{const c=document.createElement('canvas');c.width=c.height=256;const g=c.getContext('2d');g.drawImage(im,0,0);
+   const d=g.getImageData(0,0,256,256).data,f=new Uint8Array(4096);
+   for(let cy=0;cy<64;cy++)for(let cx=0;cx<64;cx++){let n=0;
+    for(let j=0;j<4;j++)for(let i=0;i<4;i++){const o=((cy*4+j)*256+cx*4+i)*4;
+     if(d[o+1]>=d[o+2]*1.3&&d[o+1]>=d[o]*1.08&&d[o+1]-d[o+2]>=10&&d[o+1]>40)n++;}
+    f[cy*64+cx]=n>=8?1:0;}
+   res(f);}catch(e){res(null);}};
+  im.onerror=()=>res(null);
+  im.src=SAT.replace('{z}',z).replace('{x}',x).replace('{y}',y);});
+}
+async function tileFlags(z,x,y){const k=z+'/'+x+'/'+y;if(tcache.has(k))return tcache.get(k);
+ for(let i=0;i<3;i++){const f=await tileOnce(z,x,y);if(f){tcache.set(k,f);return f;}}
+ return null;}
+
+const fmtT=h=>{const m=Math.round(h*60);return m>=60?Math.floor(m/60)+' h '+(m%60)+' min':m+' min';};
+const fk=x=>x.toFixed(x<10?2:1).replace('.',',');
+
+function dil(b,W,H,r){if(r<1)return b;const o=new Uint8Array(W*H),t=new Uint8Array(W*H);
+ for(let y=0;y<H;y++){const s=new Int32Array(W+1);for(let x=0;x<W;x++)s[x+1]=s[x]+b[y*W+x];
+  for(let x=0;x<W;x++)t[y*W+x]=s[Math.min(W,x+r+1)]-s[Math.max(0,x-r)]>0?1:0;}
+ for(let x=0;x<W;x++){const s=new Int32Array(H+1);for(let y=0;y<H;y++)s[y+1]=s[y]+t[y*W+x];
+  for(let y=0;y<H;y++)o[y*W+x]=s[Math.min(H,y+r+1)]-s[Math.max(0,y-r)]>0?1:0;}
+ return o;}
+
+async function buildGrid(green){
+ const m=+$('mg').value;let z=16,tx0,tx1,ty0,ty1;
+ for(;;z--){const P=wps.map(l=>map.project(l,z)),xs=P.map(p=>p.x),ys=P.map(p=>p.y),
+  x0=Math.min(...xs),x1=Math.max(...xs),y0=Math.min(...ys),y1=Math.max(...ys),
+  pad=Math.max(.35*Math.max(x1-x0,y1-y0),400),n=2**z-1;
+  tx0=Math.max(0,Math.floor((x0-pad)/256));tx1=Math.min(n,Math.floor((x1+pad)/256));
+  ty0=Math.max(0,Math.floor((y0-pad)/256));ty1=Math.min(n,Math.floor((y1+pad)/256));
+  if((tx1-tx0+1)*(ty1-ty0+1)<=36||z<=11)break;}
+ const W=(tx1-tx0+1)*64,H=(ty1-ty0+1)*64,ox=tx0*256,oy=ty0*256,b=new Uint8Array(W*H),warn=[];
+ if(green){const jobs=[];
+  for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++)jobs.push(tileFlags(z,tx,ty).then(f=>({f,tx,ty})));
+  const res=await Promise.all(jobs),bad=res.filter(q=>!q.f).length;
+  for(const {f,tx,ty} of res)for(let cy=0;cy<64;cy++)for(let cx=0;cx<64;cx++)if(f?f[cy*64+cx]:bad<res.length)b[((ty-ty0)*64+cy)*W+(tx-tx0)*64+cx]=1;
+  if(bad)warn.push(bad<res.length?'Einzelne Satellitenbilder konnten nicht geladen werden – dieser Bereich wird gemieden.':'Satellitenbilder nicht lesbar – nur Sperrzonen werden berücksichtigt.');}
+ zones.forEach(zn=>{const pg=zn.map(l=>{const p=map.project(l,z);return [(p.x-ox)/4,(p.y-oy)/4];}),
+  xs=pg.map(p=>p[0]),ys=pg.map(p=>p[1]),
+  x0=Math.max(0,Math.floor(Math.min(...xs))),x1=Math.min(W-1,Math.ceil(Math.max(...xs))),
+  y0=Math.max(0,Math.floor(Math.min(...ys))),y1=Math.min(H-1,Math.ceil(Math.max(...ys)));
+  for(let y=y0;y<=y1;y++)for(let x=x0;x<=x1;x++)if(inside(pg,[x+.5,y+.5]))b[y*W+x]=1;});
+ const r=Math.max(1,Math.round(m/(156543.03*Math.cos(wps[0].lat*T)/2**z*4)));
+ const cells=wps.map(l=>{const p=map.project(l,z);
+  return [Math.min(W-1,Math.max(0,Math.floor((p.x-ox)/4))),Math.min(H-1,Math.max(0,Math.floor((p.y-oy)/4)))];});
+ if(green){let n=0;for(let i=0;i<b.length;i++)n+=b[i];if(n>.6*b.length)warn.push('Ungewöhnlich viel Fläche als Land erkannt – schalte ggf. „Grüne Flächen als Land meiden“ aus.');}
+ cells.forEach((c,i)=>{if(b[c[1]*W+c[0]])warn.push('Wegpunkt '+(i+1)+' liegt an Land bzw. in einer Sperrzone.');});
+ const d=dil(b,W,H,r),moved=[];
+ cells.forEach((c,i)=>{moved[i]=false;if(!d[c[1]*W+c[0]])return;
+  for(let k=1;k<=80&&!moved[i];k++){let best=null,bd=1e9;
+   for(let y=Math.max(0,c[1]-k);y<=Math.min(H-1,c[1]+k);y++)for(let x=Math.max(0,c[0]-k);x<=Math.min(W-1,c[0]+k);x++){
+    if(d[y*W+x])continue;const e=(x-c[0])**2+(y-c[1])**2;if(e<bd){bd=e;best=[x,y];}}
+   if(best){cells[i]=best;moved[i]=true;}}
+  if(moved[i])warn.push('Wegpunkt '+(i+1)+' liegt im Sicherheitsabstand zu Land/Sperrzone – Start bzw. Ziel wurde an die nächste freie Stelle verlegt. Ggf. Abstand verringern.');});
+ const cm=156543.03*Math.cos(wps[0].lat*T)/2**z*4;
+ if(cm>25)warn.push('Lange Route: Raster grob (ca. '+Math.round(cm)+' m pro Zelle), Details wie Häfen sind ungenau. Teile die Route in kürzere Abschnitte.');
+ return {W,H,b:d,z,ox,oy,warn,cells,moved};}
+
+function astar(b,W,H,s,t){const N=W*H,g=new Float32Array(N).fill(Infinity),par=new Int32Array(N).fill(-1),cl=new Uint8Array(N),
+ tx=t%W,ty=(t/W)|0,hh=i=>{const dx=Math.abs(i%W-tx),dy=Math.abs(((i/W)|0)-ty);return Math.max(dx,dy)+.414*Math.min(dx,dy);},
+ hf=[],hi=[];
+ const push=(f,i)=>{let k=hf.length;hf.push(f);hi.push(i);while(k>0){const p=(k-1)>>1;if(hf[p]<=f)break;hf[k]=hf[p];hi[k]=hi[p];k=p;}hf[k]=f;hi[k]=i;};
+ const pop=()=>{const ri=hi[0],lf=hf.pop(),li=hi.pop(),n=hf.length;
+  if(n){let k=0;for(;;){let c=2*k+1;if(c>=n)break;if(c+1<n&&hf[c+1]<hf[c])c++;if(hf[c]>=lf)break;hf[k]=hf[c];hi[k]=hi[c];k=c;}hf[k]=lf;hi[k]=li;}
+  return ri;};
+ g[s]=0;push(hh(s),s);
+ while(hf.length){const u=pop();if(cl[u])continue;cl[u]=1;if(u===t)break;const ux=u%W,uy=(u/W)|0;
+  for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){if(!dx&&!dy)continue;const x=ux+dx,y=uy+dy;
+   if(x<0||y<0||x>=W||y>=H)continue;const v=y*W+x;if(b[v]||cl[v])continue;
+   if(dx&&dy&&(b[uy*W+x]||b[y*W+ux]))continue;
+   const ng=g[u]+(dx&&dy?1.414:1);if(ng<g[v]){g[v]=ng;par[v]=u;push(ng+hh(v),v);}}}
+ if(!cl[t])return null;const p=[];for(let i=t;i!==-1;i=par[i])p.push(i);return p.reverse();}
+
+function los(b,W,x0,y0,x1,y1){const n=Math.max(1,Math.ceil(Math.hypot(x1-x0,y1-y0)*4));
+ for(let k=0;k<=n;k++)if(b[Math.floor(y0+(y1-y0)*k/n)*W+Math.floor(x0+(x1-x0)*k/n)])return false;return true;}
+function smooth(b,W,p){const c=p.map(i=>[i%W+.5,((i/W)|0)+.5]),o=[c[0]];let i=0;
+ while(i<c.length-1){let j=i+1;while(j+1<c.length&&los(b,W,c[i][0],c[i][1],c[j+1][0],c[j+1][1]))j++;o.push(c[j]);i=j;}return o;}
+
+const HINT='<small>Setze mindestens zwei Wegpunkte. Land erkennt das Tool automatisch an grünen Flächen im Satellitenbild; Untiefen, Sperrgebiete usw. zeichnest du als „Sperrzone“ ein.</small>';
+let seq=0,tmr;
+function render(){
+ gr.clearLayers();gRt.clearLayers();
+ zones.forEach(z=>L.polygon(z,{color:'#c0392b',weight:2,fillOpacity:.3}).addTo(gr));
+ if(draft.length)L.polyline(draft,{color:'#c0392b',dashArray:'4 4'}).addTo(gr);
+ draft.forEach(p=>L.circleMarker(p,{radius:4,color:'#c0392b'}).addTo(gr));
+ wps.forEach((p,i)=>L.marker(p,{draggable:true,icon:L.divIcon({className:'',html:'<div class="wp">'+(i+1)+'</div>',iconSize:[22,22]})})
+  .on('dragend',e=>{wps[i]=e.target.getLatLng();render();}).addTo(gr));
+ clearTimeout(tmr);
+ if(wps.length<2){seq++;$('out').innerHTML=HINT;return;}
+ $('out').innerHTML='<small>Berechne Route …</small>';
+ tmr=setTimeout(calc,300);}
+
+async function calc(){const my=++seq,out=$('out');
+ try{
+  const G=await buildGrid($('gv').checked);if(my!==seq)return;
+  let all=[wps[0]];
+  for(let i=1;i<wps.length;i++){const s=G.cells[i-1],t=G.cells[i],p=astar(G.b,G.W,G.H,s[1]*G.W+s[0],t[1]*G.W+t[0]);
+   if(!p){out.innerHTML='<b style="color:#c0392b">Keine Route zwischen Punkt '+i+' und '+(i+1)+' gefunden.</b> Vielleicht ist der Abstand zu groß oder der Weg versperrt.';return;}
+   (sm=>sm.slice(G.moved[i-1]&&i===1?0:1,G.moved[i]?sm.length:sm.length-1))(smooth(G.b,G.W,p)).forEach(c=>all.push(map.unproject(L.point(G.ox+c[0]*4,G.oy+c[1]*4),G.z)));
+   all.push(wps[i]);}
+  if(my!==seq)return;
+  L.polyline(all,{color:'#0a6ebd',weight:4}).addTo(gRt);
+  let tot=0,h='<ol>',prev=null;
+  for(let i=1;i<all.length;i++){const b=brg(all[i-1],all[i]),d=dist(all[i-1],all[i]);tot+=d;
+   if(prev!==null){let t=((b-prev+540)%360)-180;if(Math.abs(t)>=2)h+='<li class="t">↪ '+Math.abs(Math.round(t))+'° '+(t>0?'Steuerbord':'Backbord')+'</li>';}
+   h+='<li>Kurs <b>'+String(Math.round(b)).padStart(3,'0')+'°</b> · '+fk(d)+' km</li>';prev=b;}
+  out.innerHTML='<b>'+fk(tot)+' km</b> / '+fk(tot/1.852)+' sm · ca. <b>'+fmtT(tot/kmh)+'</b>'+h+'</ol>'+
+   G.warn.map(w=>'<div style="color:#c0392b;font-size:12px">⚠ '+w+'</div>').join('')+
+   '<small>Planungshilfe – ersetzt keine Seekarte. Fahrwasser, Tonnen, Wassertiefen und Sperrgebiete selbst prüfen.</small>';
+ }catch(e){out.textContent='Fehler: '+e.message;}}
+
+function setMode(m){mode=m;$('bWp').classList.toggle('on',m==='wp');$('bZone').classList.toggle('on',m==='zone');
+ $('bDone').style.display=m==='zone'?'':'none';}
+map.on('click',e=>{if(mode==='wp')wps.push(e.latlng);else draft.push(e.latlng);render();});
+$('bWp').onclick=()=>setMode('wp');$('bZone').onclick=()=>setMode('zone');
+$('bDone').onclick=()=>{if(draft.length>=3)zones.push(draft);draft=[];render();};
+$('bUndo').onclick=()=>{if(mode==='zone'&&draft.length)draft.pop();else if(mode==='zone')zones.pop();else wps.pop();render();};
+$('bClear').onclick=()=>{if(confirm('Alles löschen?')){wps=[];zones=[];draft=[];render();}};
+$('bMenu').onclick=()=>{const m=$('menu');m.style.display=m.style.display==='block'?'none':'block';};
+
+function sp(){const v=+$('sp').value;kmh=unit==='kn'?v*1.852:v;
+ $('spv').textContent=unit==='kn'?v.toString().replace('.',',')+' kn  ('+Math.round(kmh)+' km/h)':v+' km/h  ('+fk(v/1.852)+' kn)';}
+$('sp').oninput=()=>{sp();render();};
+function setUnit(u){unit=u;$('uKmh').classList.toggle('on',u==='kmh');$('uKn').classList.toggle('on',u==='kn');
+ const s=$('sp');if(u==='kn'){s.max=22;s.step=.5;s.value=Math.round(kmh/1.852*2)/2;}else{s.max=40;s.step=1;s.value=Math.round(kmh);}
+ sp();render();}
+$('uKmh').onclick=()=>setUnit('kmh');$('uKn').onclick=()=>setUnit('kn');
+
+const KEY='wasser-navi-routen';
+const load=()=>{try{return JSON.parse(localStorage.getItem(KEY))||[];}catch(e){return [];}};
+const store=a=>{try{localStorage.setItem(KEY,JSON.stringify(a));}catch(e){alert('Speichern nicht möglich.');}};
+function list(){const a=load(),el=$('list');el.innerHTML=a.length?'':'<small>Noch keine Routen gespeichert.</small>';
+ a.forEach((r,i)=>{const d=document.createElement('div');d.className='saved';
+  d.innerHTML='<span></span><button>Laden</button><button>✕</button>';d.firstChild.textContent=r.name;
+  d.children[1].onclick=()=>{wps=r.wps;zones=r.zones;draft=[];render();if(wps.length)map.fitBounds(L.latLngBounds(wps).pad(.2));};
+  d.children[2].onclick=()=>{a.splice(i,1);store(a);list();};el.appendChild(d);});}
+$('bSave').onclick=()=>{if(!wps.length)return alert('Erst Wegpunkte setzen.');
+ const a=load();a.push({name:$('nm').value.trim()||'Route '+(a.length+1),wps,zones});store(a);$('nm').value='';list();};
+$('gv').onchange=render;$('mg').oninput=()=>{$('mgv').textContent=$('mg').value+' m';render();};
+sp();list();render();
+</script></body></html>
