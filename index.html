@@ -18,7 +18,8 @@ html,body{margin:0;height:100%;font:14px system-ui,sans-serif}
 #bar{top:10px;left:50px;display:flex;gap:6px;flex-wrap:wrap;max-width:calc(100% - 70px)}
 button{border:1px solid #9ab;background:#f3f7fa;border-radius:7px;padding:6px 9px;font:inherit;cursor:pointer}
 button.on{background:#0a6ebd;color:#fff;border-color:#0a6ebd}
-#menu{top:60px;right:10px;width:270px;max-height:70%;overflow:auto;display:none}
+#menu{top:110px;right:10px;width:min(300px,calc(100% - 20px));max-height:60%;overflow:auto;display:none}
+.card label{display:block;margin:4px 0}
 #info{bottom:24px;left:10px;width:min(300px,calc(100% - 90px));max-height:42%;overflow:auto}
 #menu h4,#info h4{margin:0 0 6px}
 input[type=range]{width:100%}
@@ -39,7 +40,13 @@ small{color:#567}
  <button id="bMenu">☰ Menü</button>
 </div>
 <div id="menu" class="card">
- <h4>Geschwindigkeit</h4>
+ <div id="msum"></div>
+ <h4>Karte</h4>
+ <label><input type="radio" name="bm" value="1" checked> Karte</label>
+ <label><input type="radio" name="bm" value="2"> Satellit</label>
+ <label><input type="radio" name="bm" value="3"> OpenStreetMap</label>
+ <label><input type="checkbox" id="sea" checked> Seezeichen (Tonnen, Fahrwasser)</label>
+ <h4 style="margin-top:12px">Geschwindigkeit</h4>
  <div><b id="spv"></b>
   <button id="uKmh" class="on">km/h</button><button id="uKn">kn</button></div>
  <input type="range" id="sp" min="1" max="40" step="1" value="20">
@@ -60,7 +67,7 @@ const base1=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Wo
 const base2=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,attribution:'© Esri'});
 const sea=L.tileLayer('https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png',{maxZoom:18,attribution:'© OpenSeaMap'}).addTo(map);
 const base3=L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'});
-L.control.layers({'Karte':base1,'Satellit':base2,'OpenStreetMap':base3},{'Seezeichen (OpenSeaMap)':sea},{position:'bottomright'}).addTo(map);
+sea.setZIndex(2);
 const gr=L.layerGroup().addTo(map);
 let wps=[],zones=[],draft=[],mode='wp',unit='kmh',kmh=20;
 const K=Math.cos(53.3*Math.PI/180), T=Math.PI/180;
@@ -163,7 +170,7 @@ function smooth(b,W,p){const c=p.map(i=>[i%W+.5,((i/W)|0)+.5]),o=[c[0]];let i=0;
 const HINT='<small>Setze mindestens zwei Wegpunkte. Land erkennt das Tool automatisch an grünen Flächen im Satellitenbild; Untiefen, Sperrgebiete usw. zeichnest du als „Sperrzone“ ein.</small>';
 let seq=0,tmr;
 function render(){
- gr.clearLayers();gRt.clearLayers();
+ gr.clearLayers();gRt.clearLayers();$('msum').innerHTML='';
  zones.forEach(z=>L.polygon(z,{color:'#c0392b',weight:2,fillOpacity:.3}).addTo(gr));
  if(draft.length)L.polyline(draft,{color:'#c0392b',dashArray:'4 4'}).addTo(gr);
  draft.forEach(p=>L.circleMarker(p,{radius:4,color:'#c0392b'}).addTo(gr));
@@ -188,7 +195,8 @@ async function calc(){const my=++seq,out=$('out');
   for(let i=1;i<all.length;i++){const b=brg(all[i-1],all[i]),d=dist(all[i-1],all[i]);tot+=d;
    if(prev!==null){let t=((b-prev+540)%360)-180;if(Math.abs(t)>=2)h+='<li class="t">↪ '+Math.abs(Math.round(t))+'° '+(t>0?'Steuerbord':'Backbord')+'</li>';}
    h+='<li>Kurs <b>'+String(Math.round(b)).padStart(3,'0')+'°</b> · '+fk(d)+' km</li>';prev=b;}
-  out.innerHTML='<b>'+fk(tot)+' km</b> / '+fk(tot/1.852)+' sm · ca. <b>'+fmtT(tot/kmh)+'</b>'+h+'</ol>'+
+  const sum='<b>'+fk(tot)+' km</b> / '+fk(tot/1.852)+' sm · ca. <b>'+fmtT(tot/kmh)+'</b>';$('msum').innerHTML='<b>Route:</b> '+sum;
+  out.innerHTML=sum+h+'</ol>'+
    G.warn.map(w=>'<div style="color:#c0392b;font-size:12px">⚠ '+w+'</div>').join('')+
    '<small>Planungshilfe – ersetzt keine Seekarte. Fahrwasser, Tonnen, Wassertiefen und Sperrgebiete selbst prüfen.</small>';
  }catch(e){out.textContent='Fehler: '+e.message;}}
@@ -200,7 +208,12 @@ $('bWp').onclick=()=>setMode('wp');$('bZone').onclick=()=>setMode('zone');
 $('bDone').onclick=()=>{if(draft.length>=3)zones.push(draft);draft=[];render();};
 $('bUndo').onclick=()=>{if(mode==='zone'&&draft.length)draft.pop();else if(mode==='zone')zones.pop();else wps.pop();render();};
 $('bClear').onclick=()=>{if(confirm('Alles löschen?')){wps=[];zones=[];draft=[];render();}};
-$('bMenu').onclick=()=>{const m=$('menu');m.style.display=m.style.display==='block'?'none':'block';};
+function placeMenu(){const m=$('menu'),b=$('bar');m.style.top=(b.offsetTop+b.offsetHeight+8)+'px';m.style.maxHeight=(innerHeight-b.offsetTop-b.offsetHeight-24)+'px';}
+$('bMenu').onclick=()=>{const m=$('menu'),o=m.style.display!=='block';m.style.display=o?'block':'none';$('info').style.display=o?'none':'';$('bMenu').classList.toggle('on',o);if(o)placeMenu();};
+addEventListener('resize',placeMenu);
+const bms={1:base1,2:base2,3:base3};
+document.querySelectorAll('input[name=bm]').forEach(r=>r.onchange=()=>{Object.values(bms).forEach(l=>map.removeLayer(l));bms[r.value].addTo(map);});
+$('sea').onchange=e=>e.target.checked?sea.addTo(map):map.removeLayer(sea);
 
 function sp(){const v=+$('sp').value;kmh=unit==='kn'?v*1.852:v;
  $('spv').textContent=unit==='kn'?v.toString().replace('.',',')+' kn  ('+Math.round(kmh)+' km/h)':v+' km/h  ('+fk(v/1.852)+' kn)';}

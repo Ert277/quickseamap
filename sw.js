@@ -1,4 +1,4 @@
-const CACHE='quickseamap-v2';
+const CACHE='quickseamap-v3';
 const SHELL=['./','index.html','manifest.json','icons/icon-192.png','icons/icon-512.png',
  'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css',
  'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js'];
